@@ -766,11 +766,6 @@ impl Ident {
         Ident::with_dummy_span(kw::Invalid)
     }
 
-    /// Maps an interned string to an identifier with an empty syntax context.
-    pub fn from_interned_str(string: InternedString) -> Ident {
-        Ident::with_dummy_span(string.as_symbol())
-    }
-
     /// Maps a string to an identifier with a dummy span.
     pub fn from_str(string: &str) -> Ident {
         Ident::with_dummy_span(Symbol::intern(string))
@@ -812,11 +807,6 @@ impl Ident {
     /// operation because it requires locking the symbol interner.
     pub fn as_str(self) -> LocalInternedString {
         self.name.as_str()
-    }
-
-    /// Convert the name to an `InternedString`.
-    pub fn as_interned_str(self) -> InternedString {
-        self.name.as_interned_str()
     }
 }
 
@@ -871,14 +861,17 @@ impl UseSpecializedDecodable for Ident {
 
 /// An interned string.
 ///
-/// Internally, a `Symbol` is implemented as an index, and all operations
-/// (including hashing, equality, and ordering) operate on that index. The use
-/// of `rustc_index::newtype_index!` means that `Option<Symbol>` only takes up 4 bytes,
-/// because `rustc_index::newtype_index!` reserves the last 256 values for tagging purposes.
+/// Internally, a `Symbol` is implemented as an index. Ordering and hashing use
+/// the underlying string chars. Equality uses the index, but because of the
+/// interning this is equivalent to using the underlying string chars.
+///
+/// The use of `rustc_index::newtype_index!` means that `Option<Symbol>` only
+/// takes up 4 bytes, because `rustc_index::newtype_index!` reserves the last
+/// 256 values for tagging purposes.
 ///
 /// Note that `Symbol` cannot directly be a `rustc_index::newtype_index!` because it
 /// implements `fmt::Debug`, `Encodable`, and `Decodable` in special ways.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Symbol(SymbolIndex);
 
 rustc_index::newtype_index! {
@@ -922,31 +915,50 @@ impl Symbol {
         })
     }
 
-    /// Convert to an `InternedString`.
-    pub fn as_interned_str(self) -> InternedString {
-        InternedString { symbol: self }
-    }
-
     pub fn as_u32(self) -> u32 {
         self.0.as_u32()
     }
 }
 
+impl PartialOrd for Symbol {
+    fn partial_cmp(&self, other: &Symbol) -> Option<Ordering> {
+        if self == other {
+            return Some(Ordering::Equal);
+        }
+        self.with2(*other, |self_str, other_str| self_str.partial_cmp(other_str))
+    }
+}
+
+impl Ord for Symbol {
+    fn cmp(&self, other: &Symbol) -> Ordering {
+        if self == other {
+            return Ordering::Equal;
+        }
+        self.with2(*other, |self_str, other_str| self_str.cmp(other_str))
+    }
+}
+
+impl Hash for Symbol {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.with(|str| str.hash(state))
+    }
+}
+
 impl fmt::Debug for Symbol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
+        self.with(|str| fmt::Debug::fmt(&str, f))
     }
 }
 
 impl fmt::Display for Symbol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.as_str(), f)
+        self.with(|str| fmt::Display::fmt(&str, f))
     }
 }
 
 impl Encodable for Symbol {
     fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
-        s.emit_str(&self.as_str())
+        self.with(|string| s.emit_str(string))
     }
 }
 
@@ -1028,7 +1040,7 @@ pub mod sym {
 
 impl Symbol {
     fn is_used_keyword_2018(self) -> bool {
-        self >= kw::Async && self <= kw::Dyn
+        self.0 >= kw::Async.0 && self.0 <= kw::Dyn.0
     }
 
     fn is_unused_keyword_2018(self) -> bool {
@@ -1037,7 +1049,7 @@ impl Symbol {
 
     /// Used for sanity checking rustdoc keyword sections.
     pub fn is_doc_keyword(self) -> bool {
-        self <= kw::Union
+        self.0 <= kw::Union.0
     }
 
     /// A keyword or reserved identifier that can be used as a path segment.
@@ -1065,20 +1077,20 @@ impl Ident {
     // Returns `true` for reserved identifiers used internally for elided lifetimes,
     // unnamed method parameters, crate root module, error recovery etc.
     pub fn is_special(self) -> bool {
-        self.name <= kw::Underscore
+        self.name.0 <= kw::Underscore.0
     }
 
     /// Returns `true` if the token is a keyword used in the language.
     pub fn is_used_keyword(self) -> bool {
         // Note: `span.edition()` is relatively expensive, don't call it unless necessary.
-        self.name >= kw::As && self.name <= kw::While ||
+        self.name.0 >= kw::As.0 && self.name.0 <= kw::While.0 ||
         self.name.is_used_keyword_2018() && self.span.rust_2018()
     }
 
     /// Returns `true` if the token is a keyword reserved for possible future use.
     pub fn is_unused_keyword(self) -> bool {
         // Note: `span.edition()` is relatively expensive, don't call it unless necessary.
-        self.name >= kw::Abstract && self.name <= kw::Yield ||
+        self.name.0 >= kw::Abstract.0 && self.name.0 <= kw::Yield.0 ||
         self.name.is_unused_keyword_2018() && self.span.rust_2018()
     }
 
@@ -1105,9 +1117,9 @@ fn with_interner<T, F: FnOnce(&mut Interner) -> T>(f: F) -> T {
     GLOBALS.with(|globals| f(&mut *globals.symbol_interner.lock()))
 }
 
-/// An alternative to `Symbol` and `InternedString`, useful when the chars
-/// within the symbol need to be accessed. It is best used for temporary
-/// values.
+/// An alternative to `Symbol`, useful when the chars within the symbol need to
+/// be accessed. It deliberately has limited functionality and should only be
+/// used for temporary values.
 ///
 /// Because the interner outlives any thread which uses this type, we can
 /// safely treat `string` which points to interner data, as an immortal string,
@@ -1116,7 +1128,6 @@ fn with_interner<T, F: FnOnce(&mut Interner) -> T>(f: F) -> T {
 // FIXME: ensure that the interner outlives any thread which uses
 // `LocalInternedString`, by creating a new thread right after constructing the
 // interner.
-#[derive(Clone, Copy, Eq, PartialOrd, Ord)]
 pub struct LocalInternedString {
     string: &'static str,
 }
@@ -1155,91 +1166,5 @@ impl fmt::Debug for LocalInternedString {
 impl fmt::Display for LocalInternedString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self.string, f)
-    }
-}
-
-/// An alternative to `Symbol` that is focused on string contents.
-///
-/// Its implementations of `Hash`, `PartialOrd` and `Ord` work with the
-/// string chars rather than the symbol integer. This is useful when hash
-/// stability is required across compile sessions, or a guaranteed sort
-/// ordering is required.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct InternedString {
-    symbol: Symbol,
-}
-
-impl InternedString {
-    /// Maps a string to its interned representation.
-    pub fn intern(string: &str) -> Self {
-        InternedString {
-            symbol: Symbol::intern(string)
-        }
-    }
-
-    pub fn with<F: FnOnce(&str) -> R, R>(self, f: F) -> R {
-        self.symbol.with(f)
-    }
-
-    fn with2<F: FnOnce(&str, &str) -> R, R>(self, other: &InternedString, f: F) -> R {
-        self.symbol.with2(other.symbol, f)
-    }
-
-    pub fn as_symbol(self) -> Symbol {
-        self.symbol
-    }
-
-    /// Convert to a `LocalInternedString`. This is a slowish operation because it
-    /// requires locking the symbol interner.
-    pub fn as_str(self) -> LocalInternedString {
-        self.symbol.as_str()
-    }
-}
-
-impl Hash for InternedString {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.with(|str| str.hash(state))
-    }
-}
-
-impl PartialOrd<InternedString> for InternedString {
-    fn partial_cmp(&self, other: &InternedString) -> Option<Ordering> {
-        if self.symbol == other.symbol {
-            return Some(Ordering::Equal);
-        }
-        self.with2(other, |self_str, other_str| self_str.partial_cmp(other_str))
-    }
-}
-
-impl Ord for InternedString {
-    fn cmp(&self, other: &InternedString) -> Ordering {
-        if self.symbol == other.symbol {
-            return Ordering::Equal;
-        }
-        self.with2(other, |self_str, other_str| self_str.cmp(other_str))
-    }
-}
-
-impl fmt::Debug for InternedString {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.with(|str| fmt::Debug::fmt(&str, f))
-    }
-}
-
-impl fmt::Display for InternedString {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.with(|str| fmt::Display::fmt(&str, f))
-    }
-}
-
-impl Decodable for InternedString {
-    fn decode<D: Decoder>(d: &mut D) -> Result<InternedString, D::Error> {
-        Ok(InternedString::intern(&d.read_str()?))
-    }
-}
-
-impl Encodable for InternedString {
-    fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
-        self.with(|string| s.emit_str(string))
     }
 }
