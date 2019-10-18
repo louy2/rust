@@ -59,11 +59,12 @@
 //!
 //! # The three forms of iteration
 //!
-//! There are three common methods which can create iterators from a collection:
+//! There are three common methods which can create iterators from a collection
+//! `T<Item>`:
 //!
-//! * `iter()`, which iterates over `&T`.
-//! * `iter_mut()`, which iterates over `&mut T`.
-//! * `into_iter()`, which iterates over `T`.
+//! * `iter()`, which iterates over `&T<Item>`, yielding `&Item`.
+//! * `iter_mut()`, which iterates over `&mut T<Item>`, yielding `&mut Item`.
+//! * `into_iter()`, which iterates over `T<Item>`, yielding `Item`.
 //!
 //! Various things in the standard library may implement one or more of the
 //! three, where appropriate.
